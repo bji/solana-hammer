@@ -419,9 +419,6 @@ fn parse_args() -> Result<Args, String>
                     return Err("Only one of --rpc-server and --rpc-from-gossip may be used".to_string());
                 }
                 let rpc_server = args.nth(0).ok_or("--rpc-server requires a value".to_string())?;
-                if rpc_servers.iter().find(|&e| e == &rpc_server).is_some() {
-                    return Err(format!("Duplicate RPC server: {}", rpc_server));
-                }
                 rpc_servers.push(rpc_server);
             },
 
