@@ -882,7 +882,7 @@ fn transaction_thread_function(
         let recent_blockhash = recent_blockhash_fetcher.lock().unwrap().get();
 
         // If the fee payer is low on funds, try to transfer funds from the funds source
-        let balance = rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(LAMPORTS_PER_SOL / 100);
+        let balance = rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(0);
 
         // When balance falls below 0.01 SOL, take 0.01 SOL from funds source
         if balance < (LAMPORTS_PER_SOL / 100) {
@@ -891,7 +891,7 @@ fn transaction_thread_function(
                 &funds_source,
                 &funds_source,
                 &fee_payer_pubkey,
-                LAMPORTS_PER_SOL,
+                LAMPORTS_PER_SOL / 100,
                 &recent_blockhash
             );
         }
