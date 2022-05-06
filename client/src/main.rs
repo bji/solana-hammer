@@ -1059,7 +1059,7 @@ fn main()
 
         match rpc_client.send_and_confirm_transaction(&transaction) {
             Ok(_) => accounts_to_create -= create_count,
-            Err(_) => ()
+            Err(e) => println!("TX failed: {}", e)
         }
     }
 
@@ -1156,6 +1156,7 @@ fn main()
         match rpc_client.send_and_confirm_transaction(&transaction) {
             Ok(_) => (),
             Err(e) => {
+                println!("TX failed: {}", e);
                 // Failed transaction, so all accounts it tried to delete are back
                 v.into_iter().for_each(|account| accounts.add_existing_account(account));
             }
