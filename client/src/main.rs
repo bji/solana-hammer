@@ -884,8 +884,8 @@ fn transaction_thread_function(
         // If the fee payer is low on funds, try to transfer funds from the funds source
         let balance = rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(0);
 
-        // When balance falls below 0.5 SOL, take 1 SOL from funds source
-        if balance < (LAMPORTS_PER_SOL / 2) {
+        // When balance falls below 0.01 SOL, take 0.01 SOL from funds source
+        if balance < (LAMPORTS_PER_SOL / 100) {
             transfer_lamports(
                 &rpc_client,
                 &funds_source,
@@ -911,7 +911,8 @@ fn transaction_thread_function(
 
         let start = SystemTime::now();
 
-        match rpc_client.send_and_confirm_transaction(&transaction) {
+        //match rpc_client.send_and_confirm_transaction(&transaction) {
+        match rpc_client.send_transaction(&transaction) {
             Ok(_) => {
                 let duration = SystemTime::now().duration_since(start).map(|d| d.as_millis()).unwrap_or(0);
                 locked_println(&print_lock, format!("Thread {}: TX success in {} ms", thread_number, duration));
