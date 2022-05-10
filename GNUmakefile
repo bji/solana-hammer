@@ -26,47 +26,7 @@ util/bs58/target/release/bs58: util/bs58/src/main.rs
 client/target/release/client: client/src/main.rs
 	cargo build --manifest-path client/Cargo.toml --release
 
-keys/program_1.json:
-	@mkdir -p keys
-	solana-keygen new -s --no-bip39-passphrase -o $@
-
-keys/program_2.json:
-	@mkdir -p keys
-	solana-keygen new -s --no-bip39-passphrase -o $@
-
-keys/program_3.json:
-	@mkdir -p keys
-	solana-keygen new -s --no-bip39-passphrase -o $@
-
-keys/program_4.json:
-	@mkdir -p keys
-	solana-keygen new -s --no-bip39-passphrase -o $@
-
-keys/program_5.json:
-	@mkdir -p keys
-	solana-keygen new -s --no-bip39-passphrase -o $@
-
-keys/program_6.json:
-	@mkdir -p keys
-	solana-keygen new -s --no-bip39-passphrase -o $@
-
-keys/program_7.json:
-	@mkdir -p keys
-	solana-keygen new -s --no-bip39-passphrase -o $@
-
-keys/program_8.json:
-	@mkdir -p keys
-	solana-keygen new -s --no-bip39-passphrase -o $@
-
-keys/program_9.json:
-	@mkdir -p keys
-	solana-keygen new -s --no-bip39-passphrase -o $@
-
-keys/program_10.json:
-	@mkdir -p keys
-	solana-keygen new -s --no-bip39-passphrase -o $@
-
-target/program_1.po: keys/program_1.json $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
+target/program_1.po: $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
 	@mkdir -p $(dir $@)
 	$(SDK_CLANG) $(C_FLAGS) $(BPF_C_FLAGS)                                                                         \
             -DSELF_PROGRAM_ID_BYTES="$(call program_id_bytes,keys/program_1.json)"                                     \
@@ -78,7 +38,7 @@ target/program_1.so: target/program_1.po
 	$(SDK_LD) -z notext -shared --Bdynamic $(SDK_ROOT)/bpf/c/bpf.ld --entry entrypoint -o $@ $^
 	strip -s -R .comment $@
 
-target/program_2.po: keys/program_2.json $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
+target/program_2.po: $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
 	@mkdir -p $(dir $@)
 	$(SDK_CLANG) $(C_FLAGS) $(BPF_C_FLAGS)                                                                         \
             -DSELF_PROGRAM_ID_BYTES="$(call program_id_bytes,keys/program_2.json)"                                     \
@@ -90,7 +50,7 @@ target/program_2.so: target/program_2.po
 	$(SDK_LD) -z notext -shared --Bdynamic $(SDK_ROOT)/bpf/c/bpf.ld --entry entrypoint -o $@ $^
 	strip -s -R .comment $@
 
-target/program_3.po: keys/program_3.json $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
+target/program_3.po: $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
 	@mkdir -p $(dir $@)
 	$(SDK_CLANG) $(C_FLAGS) $(BPF_C_FLAGS)                                                                         \
             -DSELF_PROGRAM_ID_BYTES="$(call program_id_bytes,keys/program_3.json)"                                     \
@@ -102,7 +62,7 @@ target/program_3.so: target/program_3.po
 	$(SDK_LD) -z notext -shared --Bdynamic $(SDK_ROOT)/bpf/c/bpf.ld --entry entrypoint -o $@ $^
 	strip -s -R .comment $@
 
-target/program_4.po: keys/program_4.json $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
+target/program_4.po: $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
 	@mkdir -p $(dir $@)
 	$(SDK_CLANG) $(C_FLAGS) $(BPF_C_FLAGS)                                                                         \
             -DSELF_PROGRAM_ID_BYTES="$(call program_id_bytes,keys/program_4.json)"                                     \
@@ -114,7 +74,7 @@ target/program_4.so: target/program_4.po
 	$(SDK_LD) -z notext -shared --Bdynamic $(SDK_ROOT)/bpf/c/bpf.ld --entry entrypoint -o $@ $^
 	strip -s -R .comment $@
 
-target/program_5.po: keys/program_5.json $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
+target/program_5.po: $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
 	@mkdir -p $(dir $@)
 	$(SDK_CLANG) $(C_FLAGS) $(BPF_C_FLAGS)                                                                         \
             -DSELF_PROGRAM_ID_BYTES="$(call program_id_bytes,keys/program_5.json)"                                     \
@@ -126,7 +86,7 @@ target/program_5.so: target/program_5.po
 	$(SDK_LD) -z notext -shared --Bdynamic $(SDK_ROOT)/bpf/c/bpf.ld --entry entrypoint -o $@ $^
 	strip -s -R .comment $@
 
-target/program_6.po: keys/program_6.json $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
+target/program_6.po: $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
 	@mkdir -p $(dir $@)
 	$(SDK_CLANG) $(C_FLAGS) $(BPF_C_FLAGS)                                                                         \
             -DSELF_PROGRAM_ID_BYTES="$(call program_id_bytes,keys/program_6.json)"                                     \
@@ -138,7 +98,7 @@ target/program_6.so: target/program_6.po
 	$(SDK_LD) -z notext -shared --Bdynamic $(SDK_ROOT)/bpf/c/bpf.ld --entry entrypoint -o $@ $^
 	strip -s -R .comment $@
 
-target/program_7.po: keys/program_7.json $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
+target/program_7.po: $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
 	@mkdir -p $(dir $@)
 	$(SDK_CLANG) $(C_FLAGS) $(BPF_C_FLAGS)                                                                         \
             -DSELF_PROGRAM_ID_BYTES="$(call program_id_bytes,keys/program_7.json)"                                     \
@@ -150,7 +110,7 @@ target/program_7.so: target/program_7.po
 	$(SDK_LD) -z notext -shared --Bdynamic $(SDK_ROOT)/bpf/c/bpf.ld --entry entrypoint -o $@ $^
 	strip -s -R .comment $@
 
-target/program_8.po: keys/program_8.json $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
+target/program_8.po: $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
 	@mkdir -p $(dir $@)
 	$(SDK_CLANG) $(C_FLAGS) $(BPF_C_FLAGS)                                                                         \
             -DSELF_PROGRAM_ID_BYTES="$(call program_id_bytes,keys/program_8.json)"                                     \
@@ -162,7 +122,7 @@ target/program_8.so: target/program_8.po
 	$(SDK_LD) -z notext -shared --Bdynamic $(SDK_ROOT)/bpf/c/bpf.ld --entry entrypoint -o $@ $^
 	strip -s -R .comment $@
 
-target/program_9.po: keys/program_9.json $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
+target/program_9.po: $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
 	@mkdir -p $(dir $@)
 	$(SDK_CLANG) $(C_FLAGS) $(BPF_C_FLAGS)                                                                         \
             -DSELF_PROGRAM_ID_BYTES="$(call program_id_bytes,keys/program_9.json)"                                     \
@@ -174,7 +134,7 @@ target/program_9.so: target/program_9.po
 	$(SDK_LD) -z notext -shared --Bdynamic $(SDK_ROOT)/bpf/c/bpf.ld --entry entrypoint -o $@ $^
 	strip -s -R .comment $@
 
-target/program_10.po: keys/program_10.json $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
+target/program_10.po: $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
 	@mkdir -p $(dir $@)
 	$(SDK_CLANG) $(C_FLAGS) $(BPF_C_FLAGS)                                                                         \
             -DSELF_PROGRAM_ID_BYTES="$(call program_id_bytes,keys/program_10.json)"                                    \
