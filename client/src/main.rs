@@ -33,8 +33,8 @@ use std::time::{Duration, SystemTime};
 // should be as close as possible to the actual compute unit cost, and should err on the side of over-estimating
 // costs if necessary.  These are hardcoded from observed values and could be made overridable by command line
 // parameters if that ends up being useful.
-const SMALL_TX_MAX_COMPUTE_UNITS : u32 = 80_000;
-const MEDIUM_TX_MAX_COMPUTE_UNITS : u32 = 600_000;
+const SMALL_TX_MAX_COMPUTE_UNITS : u32 = 40_000;
+const MEDIUM_TX_MAX_COMPUTE_UNITS : u32 = 1_100_000;
 const LARGE_TX_MAX_COMPUTE_UNITS : u32 = 1_400_000;
 const MAX_INSTRUCTION_COMPUTE_UNITS : u32 = 600_000;
 const FAIL_COMMAND_COST : u32 = 1000;
@@ -1060,6 +1060,13 @@ fn transaction_thread_function(
 
         // Only check balance once every 1,000 iterations
         if (iterations % 1000) == 0 {
+            if let Some(ref total_transactions) = total_transactions {
+                let total_transactions = total_transactions.lock().unwrap();
+                println!("Thread {}: iteration {} ({} remaining)", thread_number, iterations, *total_transactions);
+            }
+            else {
+                println!("Thread {}: iteration {}", thread_number, iterations);
+            }
             // When balance falls below 1 SOL, take 1 SOL from funds source
             if rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(0) < LAMPORTS_PER_TRANSFER {
                 transfer_lamports(
@@ -1218,16 +1225,16 @@ fn transaction_thread_function(
 
         let current_tpu = current_tpu.get();
 
-        locked_println(
-            &print_lock,
-            format!(
-                "Thread {}: Submitting transaction to {}\n  Signature: {}",
-                thread_number,
-                //base64::encode(&tx_bytes),
-                current_tpu,
-                transaction.signatures[0]
-            )
-        );
+        //        locked_println(
+        //            &print_lock,
+        //            format!(
+        //                "Thread {}: Submitting transaction to {}\n  Signature: {}",
+        //                thread_number,
+        //                //base64::encode(&tx_bytes),
+        //                current_tpu,
+        //                transaction.signatures[0]
+        //            )
+        //        );
 
         let _ = UdpSocket::bind("0.0.0.0:0").unwrap().send_to(tx_bytes.as_slice(), current_tpu);
     }
