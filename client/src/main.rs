@@ -15,6 +15,7 @@ use solana_sdk::system_instruction;
 use solana_sdk::transaction::Transaction;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::net::{SocketAddr, UdpSocket};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -32,7 +33,9 @@ use std::time::{Duration, SystemTime};
 // should be as close as possible to the actual compute unit cost, and should err on the side of over-estimating
 // costs if necessary.  These are hardcoded from observed values and could be made overridable by command line
 // parameters if that ends up being useful.
-const MAX_TX_COMPUTE_UNITS : u32 = 1_400_000;
+const SMALL_TX_MAX_COMPUTE_UNITS : u32 = 80_000;
+const MEDIUM_TX_MAX_COMPUTE_UNITS : u32 = 600_000;
+const LARGE_TX_MAX_COMPUTE_UNITS : u32 = 1_400_000;
 const MAX_INSTRUCTION_COMPUTE_UNITS : u32 = 600_000;
 const FAIL_COMMAND_COST : u32 = 1000;
 const CPU_COMMAND_COST_PER_ITERATION : u32 = 5000;
@@ -45,11 +48,16 @@ const FAIL_COMMAND_CHANCE : f32 = 0.001;
 const MAX_ALLOC_BYTES : u32 = 1000;
 const RECENT_BLOCKHASH_REFRESH_INTERVAL_SECS : u64 = 30;
 const CONTENTION_ACCOUNT_COUNT : u32 = 20;
+const LAMPORTS_PER_TRANSFER : u64 = LAMPORTS_PER_SOL / 5;
 
-enum RpcSpec
+struct RpcWrapper
 {
-    // Find RPC servers on gossip
-    FindFromGossip // Use
+    rpc_client : RpcClient
+}
+
+fn elapsed_ms(since : SystemTime) -> u64
+{
+    since.elapsed().map(|d| d.as_millis()).unwrap_or(0) as u64
 }
 
 struct RecentBlockhashFetcher
@@ -59,23 +67,30 @@ struct RecentBlockhashFetcher
 
 impl RecentBlockhashFetcher
 {
-    pub fn new(rpc_clients : Arc<Mutex<RpcClients>>) -> Self
+    pub fn new(rpc_clients : &Arc<Mutex<RpcClients>>) -> Self
     {
         let recent_blockhash : Arc<Mutex<Option<Hash>>> = Arc::new(Mutex::new(None));
 
         {
+            let rpc_clients = rpc_clients.clone();
             let recent_blockhash = recent_blockhash.clone();
 
             std::thread::spawn(move || {
                 loop {
-                    let rpc_client = rpc_clients.lock().unwrap().get();
-                    if let Some(next_recent_blockhash) = rpc_client.get_latest_blockhash().ok() {
-                        // Hacky, but it's really hard to coordinate recent blockhash across rpc servers.  So just
-                        // don't present a block hash until 1 second after it is fetched
-                        std::thread::sleep(Duration::from_secs(1));
-                        *(recent_blockhash.lock().unwrap()) = Some(next_recent_blockhash);
-                        // Wait 30 seconds to fetch again
-                        std::thread::sleep(Duration::from_secs(RECENT_BLOCKHASH_REFRESH_INTERVAL_SECS));
+                    let rpc_client = { rpc_clients.lock().unwrap().get() };
+                    match rpc_client.get_latest_blockhash() {
+                        Ok(next_recent_blockhash) => {
+                            // Hacky, but it's really hard to coordinate recent blockhash across rpc servers.  So just
+                            // don't present a block hash until 5 seconds after it is fetched
+                            std::thread::sleep(Duration::from_secs(5));
+                            *(recent_blockhash.lock().unwrap()) = Some(next_recent_blockhash);
+                            // Wait 30 seconds to fetch again
+                            std::thread::sleep(Duration::from_secs(RECENT_BLOCKHASH_REFRESH_INTERVAL_SECS - 5));
+                        },
+                        Err(err) => {
+                            eprintln!("Failed to get recent blockhash: {}", err);
+                            std::thread::sleep(Duration::from_millis(500));
+                        }
                     }
                 }
             });
@@ -84,8 +99,6 @@ impl RecentBlockhashFetcher
         Self { recent_blockhash }
     }
 
-    // Hacky, but it's really hard to coordinate recent blockhash across rpc servers.  So just don't present
-    // a block hash until 5 seconds after it is fetched
     pub fn get(&mut self) -> Hash
     {
         loop {
@@ -102,13 +115,298 @@ impl RecentBlockhashFetcher
     }
 }
 
+struct SlotFetcher
+{
+    // (fetch_time, slot_at_fetch_time)
+    slots : Arc<Mutex<(SystemTime, u64)>>
+}
+
+impl SlotFetcher
+{
+    pub fn new(rpc_clients : &Arc<Mutex<RpcClients>>) -> Self
+    {
+        let slots = Arc::new(Mutex::new((SystemTime::now(), 0)));
+
+        {
+            let rpc_clients = rpc_clients.clone();
+            let slots = slots.clone();
+            let updater = Self { slots };
+            let rpc_client = { rpc_clients.lock().unwrap().get() };
+            updater.update(&rpc_client);
+
+            std::thread::spawn(move || {
+                loop {
+                    // Sleep 10 seconds before fetching again
+                    std::thread::sleep(Duration::from_secs(10));
+                    let rpc_client = { rpc_clients.lock().unwrap().get() };
+                    updater.update(&rpc_client);
+                }
+            });
+        }
+
+        Self { slots }
+    }
+
+    // returns (fetch_time, slot_at_fetch_time)
+    pub fn get(&self) -> (SystemTime, u64)
+    {
+        self.slots.lock().unwrap().clone()
+    }
+
+    pub fn update(
+        &self,
+        rpc_client : &RpcClient
+    )
+    {
+        loop {
+            let before = SystemTime::now();
+            match rpc_client.get_epoch_info() {
+                Ok(epoch_info) => {
+                    // Pick a timestamp halfway between when the epoch info started being fetched, and the result
+                    // came back, to try to get closer to the actual time that the epoch info was gathered
+                    let elapsed = before.elapsed().unwrap_or(Duration::from_millis(0)).div_f32(2_f32);
+                    *(self.slots.lock().unwrap()) =
+                        (before.checked_add(elapsed).unwrap_or(before), epoch_info.absolute_slot);
+                    break;
+                },
+                Err(err) => {
+                    eprintln!("Failed to fetch epoch info: {}", err);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+struct LeadersFetcher
+{
+    // (first_slot, leaders_starting_at_first_slot)
+    leaders : Arc<Mutex<(u64, Vec<String>)>>
+}
+
+impl LeadersFetcher
+{
+    pub fn new(rpc_clients : &Arc<Mutex<RpcClients>>) -> Self
+    {
+        let leaders = Arc::new(Mutex::new((0_u64, Vec::<String>::new())));
+
+        {
+            let rpc_clients = rpc_clients.clone();
+            let leaders = leaders.clone();
+            let updater = Self { leaders };
+            let rpc_client = { rpc_clients.lock().unwrap().get() };
+            updater.update(&rpc_client);
+
+            std::thread::spawn(move || {
+                loop {
+                    // Sleep 15 minutes before fetching again
+                    std::thread::sleep(Duration::from_secs(60 * 60));
+                    let rpc_client = { rpc_clients.lock().unwrap().get() };
+                    updater.update(&rpc_client);
+                }
+            });
+        }
+
+        Self { leaders }
+    }
+
+    // returns (slot of first leader, leader pubkey strings starting at that slot)
+    pub fn get(
+        &self,
+        target_slot : u64
+    ) -> Option<String>
+    {
+        let leaders = self.leaders.lock().unwrap();
+
+        let slot = leaders.0;
+        let leaders = &leaders.1;
+
+        if (target_slot < slot) || (target_slot >= (slot + (leaders.len() as u64))) {
+            None
+        }
+        else {
+            Some(leaders[(target_slot - slot) as usize].clone())
+        }
+    }
+
+    pub fn update(
+        &self,
+        rpc_client : &RpcClient
+    )
+    {
+        loop {
+            match rpc_client.get_slot() {
+                Ok(slot) => match rpc_client.get_slot_leaders(slot, 4000) {
+                    Ok(new_leaders) => {
+                        *(self.leaders.lock().unwrap()) =
+                            (slot, new_leaders.into_iter().map(|p| format!("{}", p)).collect());
+                        break;
+                    },
+                    Err(err) => eprintln!("Failed to fetch slot leaders: {}", err)
+                },
+                Err(err) => eprintln!("Failed to fetch slot: {}", err)
+            }
+
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+}
+
+struct TpuFetcher
+{
+    // Hash from pubkey (as string) to tvu port address
+    validators : Arc<Mutex<HashMap<String, SocketAddr>>>
+}
+
+impl TpuFetcher
+{
+    // Loads from a file that a separate program writes, because using gossip at the same time as RPC causes no end of
+    // problems.  So let some other machine fetch tpu info about the cluster and write it out periodically.  This
+    // implementation will re-load the tpu file once every 5 minutes.
+    pub fn new(tpu_file : &String) -> Self
+    {
+        let validators = Arc::new(Mutex::new(Self::load_validators(tpu_file)));
+
+        {
+            let validators = validators.clone();
+            let tpu_file = tpu_file.clone();
+
+            std::thread::spawn(move || loop {
+                // Wait 5 minutes
+                std::thread::sleep(Duration::from_secs(60 * 5));
+
+                *(validators.lock().unwrap()) = Self::load_validators(&tpu_file);
+            });
+        }
+
+        Self { validators }
+    }
+
+    // key is pubkey string
+    pub fn get(
+        &self,
+        key : &String
+    ) -> Option<SocketAddr>
+    {
+        self.validators.lock().unwrap().get(key).map(|tpu| tpu.clone())
+    }
+
+    fn load_validators(from : &str) -> HashMap<String, SocketAddr>
+    {
+        match std::fs::read(from) {
+            Ok(data) => bincode::deserialize(data.as_slice()).unwrap_or_else(|err| {
+                eprintln!("Failed to deserialize {}: {}", from, err);
+                HashMap::<String, SocketAddr>::new()
+            }),
+            Err(err) => {
+                eprintln!("Failed to read {}: {}", from, err);
+                HashMap::<String, SocketAddr>::new()
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CurrentTpu
+{
+    current_tpu : Arc<Mutex<SocketAddr>>
+}
+
+impl CurrentTpu
+{
+    pub fn new(
+        tpu_file : &String,
+        rpc_clients : &Arc<Mutex<RpcClients>>
+    ) -> Self
+    {
+        let tpu_fetcher = TpuFetcher::new(tpu_file);
+
+        let leaders_fetcher = LeadersFetcher::new(&rpc_clients);
+
+        let slot_fetcher = SlotFetcher::new(&rpc_clients);
+
+        let current_tpu = loop {
+            let rpc_client = { rpc_clients.lock().unwrap().get() };
+            if let Some(tpu) = Self::update(&rpc_client, &slot_fetcher, &leaders_fetcher, &tpu_fetcher) {
+                break tpu;
+            }
+            else {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        };
+
+        let current_tpu : Arc<Mutex<SocketAddr>> = Arc::new(Mutex::new(current_tpu));
+
+        // Start a thread to keep current_tpu up-to-date
+        {
+            let rpc_clients = rpc_clients.clone();
+            let current_tpu = current_tpu.clone();
+
+            std::thread::spawn(move || {
+                loop {
+                    // Wait 500 ms to re-update leader TPU
+                    std::thread::sleep(Duration::from_millis(500));
+                    let rpc_client = { rpc_clients.lock().unwrap().get() };
+                    if let Some(tpu) = Self::update(&rpc_client, &slot_fetcher, &leaders_fetcher, &tpu_fetcher) {
+                        *(current_tpu.lock().unwrap()) = tpu;
+                    }
+                }
+            });
+        }
+
+        Self { current_tpu }
+    }
+
+    pub fn get(&self) -> SocketAddr
+    {
+        self.current_tpu.lock().unwrap().clone()
+    }
+
+    fn update(
+        rpc_client : &RpcClient,
+        slot_fetcher : &SlotFetcher,
+        leaders_fetcher : &LeadersFetcher,
+        tpu_fetcher : &TpuFetcher
+    ) -> Option<SocketAddr>
+    {
+        // Update tpu
+
+        // Get the current slot and the timestamp of when it was fetched
+        let (slot_at, slot) = slot_fetcher.get();
+
+        // Estimate the slot based on current_slot, current_slot_at, and elapsed time (500 ms per slot)
+        let slot =
+            slot + (SystemTime::now().duration_since(slot_at).map(|d| d.as_millis() as u64).unwrap_or(u64::MAX) / 500);
+
+        // Get the upcoming slot leader
+        if let Some(leader) = leaders_fetcher.get(slot) {
+            if let Some(tpu) = tpu_fetcher.get(&leader) {
+                Some(tpu)
+            }
+            else {
+                // There is no validator that maps from that leader; weird that a validator would be
+                // in the leader schedule but unknown to us.  There's nothing to do except wait try another
+                // slot later.
+                None
+            }
+        }
+        else {
+            // The slot that we believe is the current leader slot is not bounded by the leader slots
+            // that we know about.  So re-fetch the current slots and also the upcoming leader slots,
+            // and try again.
+            slot_fetcher.update(&rpc_client);
+            leaders_fetcher.update(&rpc_client);
+            None
+        }
+    }
+}
+
 struct Args
 {
     pub keys_dir : String,
 
-    // If set, will find RPC servers from gossip and use the ones it finds in addition to any specified via
-    // --rpc-server
-    pub rpc_from_gossip : Option<String>,
+    // file to read tpu info from
+    pub tpu_file : String,
 
     // Explicitly named RPC servers
     pub rpc_servers : Vec<String>,
@@ -378,7 +676,7 @@ fn parse_args() -> Result<Args, String>
 
     let mut keys_dir = None;
 
-    let mut rpc_from_gossip = None;
+    let mut tpu_file = None;
 
     let mut rpc_servers = Vec::<String>::new();
 
@@ -403,21 +701,15 @@ fn parse_args() -> Result<Args, String>
                 }
             },
 
-            "--rpc-from-gossip" => {
-                if rpc_from_gossip.is_some() {
-                    return Err("Duplicate --rpc-from-gossip argument".to_string());
+            "--tpu-file" => {
+                if tpu_file.is_some() {
+                    return Err("Duplicate --tpu-file".to_string());
                 }
-                if !rpc_servers.is_empty() {
-                    return Err("Only one of --rpc-from-gossip and --rpc-server may be used".to_string());
-                }
-                let entrypoint = args.nth(0).ok_or("--rpc-from-gossip requires a value".to_string())?;
-                rpc_from_gossip = Some(entrypoint);
+                let file = args.nth(0).ok_or("--tpu-file requires a value".to_string())?;
+                tpu_file = Some(file);
             },
 
             "--rpc-server" => {
-                if rpc_from_gossip.is_some() {
-                    return Err("Only one of --rpc-server and --rpc-from-gossip may be used".to_string());
-                }
                 let rpc_server = args.nth(0).ok_or("--rpc-server requires a value".to_string())?;
                 rpc_servers.push(rpc_server);
             },
@@ -475,11 +767,11 @@ fn parse_args() -> Result<Args, String>
 
     let keys_dir = keys_dir.unwrap_or("./keys".to_string());
 
-    if rpc_from_gossip.is_none() && rpc_servers.is_empty() {
-        return Err("If --rpc-from-gossip is not set, then at least one RPC server specified via --rpc-server option \
-                    is required"
-            .to_string());
+    if tpu_file.is_none() {
+        return Err("--tpu-file argument is required".to_string());
     }
+
+    let tpu_file = tpu_file.unwrap();
 
     if funds_source.is_none() {
         return Err("--funds-source argument is required".to_string());
@@ -497,7 +789,7 @@ fn parse_args() -> Result<Args, String>
         return Err("--num-threads must takea nonzero argument".to_string());
     }
 
-    Ok(Args { keys_dir, rpc_from_gossip, rpc_servers, funds_source, program_ids, total_transactions, num_threads })
+    Ok(Args { keys_dir, tpu_file, rpc_servers, funds_source, program_ids, total_transactions, num_threads })
 }
 
 fn write(
@@ -736,6 +1028,7 @@ fn transaction_thread_function(
     program_ids : Vec<Pubkey>,
     funds_source : Keypair,
     mut accounts : Arc<Mutex<Accounts>>,
+    current_tpu : CurrentTpu,
     total_transactions : Option<Arc<Mutex<u64>>>
 )
 {
@@ -751,7 +1044,41 @@ fn transaction_thread_function(
     // Make a random number generator for this thread
     let mut rng = rand::thread_rng();
 
+    let mut iterations = 0;
+
     loop {
+        // Make sure there are still transactions to complete before doing balance transfer
+        if let Some(ref total_transactions) = total_transactions {
+            if *(total_transactions.lock().unwrap()) == 0 {
+                break;
+            }
+        }
+
+        let rpc_client = { rpc_clients.lock().unwrap().get() };
+
+        let recent_blockhash = recent_blockhash_fetcher.lock().unwrap().get();
+
+        // Only check balance once every 1,000 iterations
+        if (iterations % 1000) == 0 {
+            // When balance falls below 1 SOL, take 1 SOL from funds source
+            if rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(0) < LAMPORTS_PER_TRANSFER {
+                transfer_lamports(
+                    &rpc_client,
+                    &funds_source,
+                    &funds_source,
+                    &fee_payer_pubkey,
+                    LAMPORTS_PER_TRANSFER,
+                    &recent_blockhash
+                );
+                // If the balance is still too low, continue the loop to try again
+                if rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(0) < LAMPORTS_PER_TRANSFER {
+                    continue;
+                }
+            }
+        }
+
+        iterations += 1;
+
         if let Some(ref total_transactions) = total_transactions {
             let mut total_transactions = total_transactions.lock().unwrap();
             if *total_transactions == 0 {
@@ -764,8 +1091,13 @@ fn transaction_thread_function(
 
         let mut allocated_indices = HashSet::<u8>::new();
 
-        let mut compute_budget =
-            (rng.next_u32() % (MAX_TX_COMPUTE_UNITS - CPU_COMMAND_COST_PER_ITERATION)) + CPU_COMMAND_COST_PER_ITERATION;
+        // 1/3 chance of "small" transaction, 1/3 chance of "medium" transaction, 1/3 chance of "large" transaction
+        let (min, max) = match rng.next_u32() % 3 {
+            0 => (0, SMALL_TX_MAX_COMPUTE_UNITS),
+            1 => (SMALL_TX_MAX_COMPUTE_UNITS, MEDIUM_TX_MAX_COMPUTE_UNITS),
+            _ => (MEDIUM_TX_MAX_COMPUTE_UNITS, LARGE_TX_MAX_COMPUTE_UNITS)
+        };
+        let mut compute_budget = (rng.next_u32() % (max - min)) + min + CPU_COMMAND_COST_PER_ITERATION;
 
         // Vector to hold data for each individual command:
         // (data, command_accounts, compute_usage)
@@ -874,58 +1206,34 @@ fn transaction_thread_function(
             }
         }
 
-        let rpc_client = rpc_clients.lock().unwrap().get();
-
         // Execute the transaction
 
-        // First get recent blockhash
+        // Refresh recent blockhash
         let recent_blockhash = recent_blockhash_fetcher.lock().unwrap().get();
-
-        // If the fee payer is low on funds, try to transfer funds from the funds source
-        let balance = rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(0);
-
-        // When balance falls below 0.01 SOL, take 0.01 SOL from funds source
-        if balance < (LAMPORTS_PER_SOL / 100) {
-            transfer_lamports(
-                &rpc_client,
-                &funds_source,
-                &funds_source,
-                &fee_payer_pubkey,
-                LAMPORTS_PER_SOL / 100,
-                &recent_blockhash
-            );
-        }
 
         let transaction =
             Transaction::new(&vec![&fee_payer], Message::new(&instructions, Some(&fee_payer_pubkey)), recent_blockhash);
 
+        let tx_bytes = bincode::serialize(&transaction).expect("encode");
+
+        let current_tpu = current_tpu.get();
+
         locked_println(
             &print_lock,
             format!(
-                "Thread {}: Submitting transaction {}\n  Signature: {}",
+                "Thread {}: Submitting transaction to {}\n  Signature: {}",
                 thread_number,
-                base64::encode(bincode::serialize(&transaction).expect("encode")),
+                //base64::encode(&tx_bytes),
+                current_tpu,
                 transaction.signatures[0]
             )
         );
 
-        let start = SystemTime::now();
-
-        //match rpc_client.send_and_confirm_transaction(&transaction) {
-        match rpc_client.send_transaction(&transaction) {
-            Ok(_) => {
-                let duration = SystemTime::now().duration_since(start).map(|d| d.as_millis()).unwrap_or(0);
-                locked_println(&print_lock, format!("Thread {}: TX success in {} ms", thread_number, duration));
-            },
-            Err(e) => {
-                let duration = SystemTime::now().duration_since(start).map(|d| d.as_millis()).unwrap_or(0);
-                locked_println(&print_lock, format!("Thread {}: TX failed in {} ms: {}", thread_number, duration, e));
-            }
-        }
+        let _ = UdpSocket::bind("0.0.0.0:0").unwrap().send_to(tx_bytes.as_slice(), current_tpu);
     }
 
     // Take back all SOL from the fee payer
-    let rpc_client = rpc_clients.lock().unwrap().get();
+    let rpc_client = { rpc_clients.lock().unwrap().get() };
 
     loop {
         if let Some(balance) = rpc_client.get_balance(&fee_payer_pubkey).ok() {
@@ -959,49 +1267,16 @@ fn main()
         std::process::exit(-1)
     });
 
-    if args.rpc_from_gossip.is_some() {
-        eprintln!("--rpc-from-gossip is not supported yet");
-        std::process::exit(-1);
-    }
-
-    //    if let Some(rpc_from_gossip) = args.rpc_from_gossip {
-    //        // Discover RPC servers from gossip
-    //        let entrypoint_addr = solana_net_utils::parse_host_port(&rpc_from_gossip).unwrap_or_else(|e| {
-    //            eprintln!("Failed to parse --rpc-from-gossip address: {}", e);
-    //            std::process::exit(-1)
-    //        });
-    //        println!("Finding cluster entry: {:?}", entrypoint_addr);
-    //        let (gossip_nodes, _) = discover(
-    //            None, // keypair
-    //            Some(&entrypoint_addr),
-    //            None,                               // num_nodes
-    //            std::time::Duration::from_secs(60), // timeout
-    //            None,                               // find_node_by_pubkey
-    //            Some(&entrypoint_addr),             // find_node_by_gossip_addr
-    //            None,                               // my_gossip_addr
-    //            0,                                  // my_shred_version
-    //            SocketAddrSpace::Unspecified
-    //        )
-    //        .unwrap_or_else(|err| {
-    //            eprintln!("Failed to discover {} node: {:?}", entrypoint_addr, err);
-    //            std::process::exit(-1);
-    //        })
-    //        .iter()
-    //        .filter(|ci| ContactInfo::is_valid_address(ci.rpc));
-    //
-    //        println!("Found {} nodes", gossip_nodes.len());
-    //
-    //        gossip_nodes[0].rpc
-    //    }
-
     let mut rng = rand::thread_rng();
 
     let rpc_clients = Arc::new(Mutex::new(RpcClients::new(args.rpc_servers.clone())));
 
+    let current_tpu = CurrentTpu::new(&args.tpu_file, &rpc_clients);
+
     let program_ids = args.program_ids;
 
     // Recent blockhash is updated every 30 seconds
-    let recent_blockhash_fetcher = Arc::new(Mutex::new(RecentBlockhashFetcher::new(rpc_clients.clone())));
+    let recent_blockhash_fetcher = Arc::new(Mutex::new(RecentBlockhashFetcher::new(&rpc_clients)));
 
     let accounts = Arc::new(Mutex::new(Accounts::new()));
 
@@ -1014,7 +1289,7 @@ fn main()
     }
     while accounts_to_create > 0 {
         println!("({} accounts remain to be created)", accounts_to_create);
-        let rpc_client = rpc_clients.lock().unwrap().get();
+        let rpc_client = { rpc_clients.lock().unwrap().get() };
         let mut create_count = accounts_to_create;
         if create_count > 8 {
             create_count = 8;
@@ -1050,7 +1325,7 @@ fn main()
         );
 
         println!(
-            "Submitting transaction {}\n  Signature: {}",
+            "Submitting transaction {} to RPC\n  Signature: {}",
             base64::encode(bincode::serialize(&transaction).expect("encode")),
             transaction.signatures[0]
         );
@@ -1074,6 +1349,7 @@ fn main()
         let program_ids = program_ids.clone();
         let funds_source = Keypair::from_bytes(&funds_source.to_bytes()).expect("");
         let accounts = accounts.clone();
+        let current_tpu = current_tpu.clone();
         let iterations = iterations.clone();
 
         threads.push(std::thread::spawn(move || {
@@ -1085,6 +1361,7 @@ fn main()
                 program_ids,
                 funds_source,
                 accounts,
+                current_tpu,
                 iterations
             )
         }));
@@ -1135,7 +1412,7 @@ fn main()
         )];
 
         //let rpc_client = rpc_clients.get_finalized();
-        let rpc_client = rpc_clients.lock().unwrap().get();
+        let rpc_client = { rpc_clients.lock().unwrap().get() };
 
         let recent_blockhash = recent_blockhash_fetcher.lock().unwrap().get();
 
@@ -1146,7 +1423,7 @@ fn main()
         );
 
         println!(
-            "Submitting transaction {}\n  Signature: {}",
+            "Submitting transaction {} to RPC\n  Signature: {}",
             base64::encode(bincode::serialize(&transaction).expect("encode")),
             transaction.signatures[0]
         );
@@ -1174,6 +1451,8 @@ fn transfer_lamports(
     if *target == funds_source.pubkey() {
         return;
     }
+
+    println!("Transferring {} from {} to {}", amount, funds_source.pubkey(), target);
 
     let transaction = Transaction::new(
         &vec![fee_payer, funds_source],
