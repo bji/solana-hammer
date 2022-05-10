@@ -36,7 +36,7 @@ use std::time::{Duration, SystemTime};
 const SMALL_TX_MAX_COMPUTE_UNITS : u32 = 40_000;
 const MEDIUM_TX_MAX_COMPUTE_UNITS : u32 = 1_100_000;
 const LARGE_TX_MAX_COMPUTE_UNITS : u32 = 1_400_000;
-const MAX_INSTRUCTION_COMPUTE_UNITS : u32 = 600_000;
+const MAX_INSTRUCTION_COMPUTE_UNITS : u32 = 1_400_000;
 const FAIL_COMMAND_COST : u32 = 1000;
 const CPU_COMMAND_COST_PER_ITERATION : u32 = 5000;
 const ALLOC_COMMAND_COST : u32 = 100;
@@ -985,8 +985,20 @@ fn make_command(
         match v[(rng.next_u32() as usize) % v.len()] {
             0 => {
                 // cpu
-                let max_iterations = compute_budget / CPU_COMMAND_COST_PER_ITERATION;
-                let iterations = (rng.next_u32() % max_iterations) + 1;
+                let mut max_iterations = compute_budget / (2 * CPU_COMMAND_COST_PER_ITERATION);
+                if max_iterations == 0 {
+                    max_iterations = 1;
+                }
+                // Pick some number between 1 and half of max_iterations
+                let mut iterations = (rng.next_u32() % max_iterations) + 1;
+                // 50% of the time, iterate half of max_iterations PLUS that number
+                if (rng.next_u32() % 2) == 0 {
+                    iterations = max_iterations + iterations;
+                }
+                // 50% of the time, iterate half of max_iterations MINUS that number
+                else {
+                    iterations = max_iterations - iterations;
+                }
                 add_cpu_command(iterations, command_accounts, &mut data);
                 (data, iterations * CPU_COMMAND_COST_PER_ITERATION)
             },
