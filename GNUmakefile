@@ -20,13 +20,16 @@ endef
 ##         target/program_6.so target/program_7.so target/program_8.so target/program_9.so target/program_10.so \
 ##         client/target/release/client
 
-default: target/program_1.so client/target/release/client
+default: target/program_1.so client/target/release/client fetch_tpu/target/release/client
 
 util/bs58/target/release/bs58: util/bs58/src/main.rs
 	cargo build --manifest-path util/bs58/Cargo.toml --release
 
 client/target/release/client: client/src/main.rs
 	cargo build --manifest-path client/Cargo.toml --release
+
+fetch_tpu/target/release/client: fetch_tpu/src/main.rs
+	cargo build --manifest-path fetch_tpu/Cargo.toml --release
 
 target/program_1.po: $(wildcard program/*.c program/*.h) util/bs58/target/release/bs58
 	@mkdir -p $(dir $@)
