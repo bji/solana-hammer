@@ -16,11 +16,9 @@ $(shell solana-keygen pubkey $1 | tr -d '\n' | util/bs58/target/release/bs58 -d 
 endef
 
 .PHONY: default
-##default: target/program_1.so target/program_2.so target/program_3.so target/program_4.so target/program_5.so \
-##         target/program_6.so target/program_7.so target/program_8.so target/program_9.so target/program_10.so \
-##         client/target/release/client
-
-default: target/program_1.so client/target/release/client
+default: target/program_1.so target/program_2.so target/program_3.so target/program_4.so target/program_5.so \
+         target/program_6.so target/program_7.so target/program_8.so target/program_9.so target/program_10.so \
+         client/target/release/client
 
 util/bs58/target/release/bs58: util/bs58/src/main.rs
 	cargo build --manifest-path util/bs58/Cargo.toml --release

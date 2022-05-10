@@ -55,11 +55,6 @@ struct RpcWrapper
     rpc_client : RpcClient
 }
 
-fn elapsed_ms(since : SystemTime) -> u64
-{
-    since.elapsed().map(|d| d.as_millis()).unwrap_or(0) as u64
-}
-
 struct RecentBlockhashFetcher
 {
     recent_blockhash : Arc<Mutex<Option<Hash>>>
@@ -877,16 +872,14 @@ fn add_free_command(
 
 fn add_cpi_command(
     program_id : &Pubkey,
-    accounts : &Vec<CommandAccount>,
+    accounts : &Vec<AccountMeta>,
     data : &Vec<u8>,
     seed : Option<Vec<u8>>,
     command_accounts : &mut CommandAccounts,
     w : &mut dyn std::io::Write
 )
 {
-    for account in accounts {
-        command_accounts.add(&account.address, account.is_write, account.is_signer);
-    }
+    command_accounts.add(program_id, false, false);
 
     write(w, &[5_u8]);
 
@@ -895,11 +888,13 @@ fn add_cpi_command(
     write(w, &[accounts.len() as u8]);
 
     for account in accounts {
-        write(w, &account.address.to_bytes());
+        write(w, &account.pubkey.to_bytes());
 
-        write(w, &[if account.is_write { 1_u8 } else { 0_u8 }]);
+        write(w, &[if account.is_writable { 1_u8 } else { 0_u8 }]);
 
         write(w, &[if account.is_signer { 1_u8 } else { 0_u8 }]);
+
+        command_accounts.add(&account.pubkey, account.is_writable, account.is_signer);
     }
 
     write(w, &(data.len() as u16).to_le_bytes());
@@ -940,6 +935,31 @@ fn random_chance(
 ) -> bool
 {
     ((rng.next_u32() as f64) / (u32::MAX as f64)) < (pct as f64)
+}
+
+// Turns an Instruction into a CPI of the same instruction, calling into some other pubkey
+fn make_cpi(
+    rng : &mut rand::rngs::ThreadRng,
+    instruction : &Instruction,
+    program_ids : &Vec<Pubkey>
+) -> Instruction
+{
+    let new_program_id = program_ids[(rng.next_u32() % (program_ids.len() as u32)) as usize];
+
+    let mut new_data = vec![];
+
+    let mut command_accounts = CommandAccounts::new();
+
+    add_cpi_command(
+        &new_program_id,
+        &instruction.accounts,
+        &instruction.data,
+        None,
+        &mut command_accounts,
+        &mut new_data
+    );
+
+    Instruction::new_with_bytes(new_program_id, new_data.as_slice(), command_accounts.get_account_metas())
 }
 
 // Create an instruction that creates an account, deletes an account, or does some amount of other random stuff.
@@ -1140,45 +1160,6 @@ fn transaction_thread_function(
             compute_budget -= actual_compute_usage;
         }
 
-        // Now turn some subsets of commands into CPI invocations
-        //                        4 => {
-        //                            // cpi
-        //                            let sub_command_accounts = CommandAccounts::new();
-        //                            let sub_data = Vec::<u8>::new();
-        //                            let sub_other_count = ((rng.next_u32() as u8) % other_count) + 1;
-        //                            let program_id =
-        //                                program_ids.iter().nth((rng.next_u32() as usize) % program_ids.len()).unwrap();
-        //                            other_count -= sub_other_count;
-        //                            make_commands(
-        //                                rng,
-        //                                program_id,
-        //                                program_ids,
-        //                                fee_payer,
-        //                                accounts,
-        //                                allocated_indices,
-        //                                0,
-        //                                0,
-        //                                sub_other_count,
-        //                                &mut sub_command_accounts,
-        //                                created_accounts,
-        //                                deleted_accounts,
-        //                                &mut sub_data
-        //                            );
-        //                            // Not doing signed cpi at the moment, that requires some sophisticated tracking of
-        //                            // account seeds
-        //                            add_cpi_command(
-        //                                program_id,
-        //                                &sub_command_accounts,
-        //                                &sub_data,
-        //                                None,
-        //                                sub_command_accounts,
-        //                                into
-        //                            );
-        //                            for account in sub_command_accounts {
-        //                                command_accounts.add(account.pubkey, account.is_write, account.is_signer);
-        //                            }
-        //                        },
-
         // Group commands together into instructions
         let mut instructions = vec![];
 
@@ -1222,6 +1203,21 @@ fn transaction_thread_function(
                     data.as_slice(),
                     instruction_accounts.get_account_metas()
                 ));
+            }
+        }
+
+        // Now turn some subset of commands into cross-program invokes, if there is more than one program
+        if (program_ids.len() > 1) && (instructions.len() > 0) {
+            loop {
+                // 75% chance of not doing CPI this loop
+                if random_chance(&mut rng, 0.75) {
+                    break;
+                }
+
+                // Pick an instruction to turn into a CPI
+                let index = (rng.next_u32() % (instructions.len() as u32)) as usize;
+
+                instructions[index] = make_cpi(&mut rng, &instructions[index], &program_ids);
             }
         }
 
