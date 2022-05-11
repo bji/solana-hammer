@@ -7,6 +7,10 @@ edition = "2021"
 name = "fetch_tpu"
 path = "src/fetch_tpu.rs"
 
+[[bin]]
+name = "make_contention_accounts"
+path = "src/make_contention_accounts.rs"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]

@@ -412,8 +412,13 @@ struct Args
     pub funds_source : Keypair,
 
     // The set of program ids that are all duplicates of the test program.  Multiple can be used to better simulate
-    // multiple programs running.
+    // multiple programs running.  The first one must have at least [contention_account_count] accounts to use for
+    // contention purposes.
     pub program_ids : Vec<Pubkey>,
+
+    // Number of accounts to use for transaction contention purposes; these accounts must exist and be PDAs of
+    // the first program_id account.  If not provided on command line, defaults to min(num_threads / 2, 1).
+    pub contention_accounts_count : u32,
 
     // Total number of transactions to run before the "cleanup" step of deleting all accounts that were created.  If
     // None, will run indefinitely.  If running indefinitely, it would be the responsibility of an external program to
@@ -679,6 +684,8 @@ fn parse_args() -> Result<Args, String>
 
     let mut program_ids = Vec::<Pubkey>::new();
 
+    let mut contention_accounts_count = None;
+
     let mut total_transactions = None;
 
     let mut num_threads = None;
@@ -726,6 +733,20 @@ fn parse_args() -> Result<Args, String>
                     return Err(format!("Duplicate program id: {}", program_id));
                 }
                 program_ids.push(program_id);
+            },
+
+            "--contention-accounts-count" => {
+                if contention_accounts_count.is_some() {
+                    return Err("Duplicate --contention-accounts-count argument".to_string());
+                }
+                else {
+                    contention_accounts_count = Some(
+                        args.nth(0)
+                            .ok_or("--contention-accounts-count requires a value".to_string())?
+                            .parse::<u32>()
+                            .map_err(|e| e.to_string())?
+                    )
+                }
             },
 
             "--total-transactions" => {
@@ -784,7 +805,22 @@ fn parse_args() -> Result<Args, String>
         return Err("--num-threads must takea nonzero argument".to_string());
     }
 
-    Ok(Args { keys_dir, tpu_file, rpc_servers, funds_source, program_ids, total_transactions, num_threads })
+    if contention_accounts_count.is_none() {
+        contention_accounts_count = Some(std::cmp::max((num_threads as u32) / 2, 1));
+    }
+
+    let contention_accounts_count = contention_accounts_count.unwrap();
+
+    Ok(Args {
+        keys_dir,
+        tpu_file,
+        rpc_servers,
+        funds_source,
+        program_ids,
+        contention_accounts_count,
+        total_transactions,
+        num_threads
+    })
 }
 
 fn write(
@@ -1111,6 +1147,8 @@ fn transaction_thread_function(
                 );
                 // If the balance is still too low, continue the loop to try again
                 if rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(0) < LAMPORTS_PER_TRANSFER {
+                    // And wait a tiny bit so as not to re-try in such a tight loop
+                    std::thread::sleep(Duration::from_millis(250));
                     continue;
                 }
             }
@@ -1282,7 +1320,7 @@ fn main()
         std::process::exit(-1)
     });
 
-    let mut rng = rand::thread_rng();
+    let rng = rand::thread_rng();
 
     let rpc_clients = Arc::new(Mutex::new(RpcClients::new(args.rpc_servers.clone())));
 
@@ -1297,58 +1335,71 @@ fn main()
 
     let funds_source = Keypair::from_bytes(&args.funds_source.to_bytes()).unwrap();
 
+    // Turns out that it's just a pain to manage the creation and deletion of accounts, so instead just going to have
+    // the accounts created by some other process and passed in as command line arguments
+
     // Create accounts, so that there is some chance of account contention
-    let mut accounts_to_create = CONTENTION_ACCOUNT_COUNT;
-    if accounts_to_create > (args.num_threads * 4) {
-        accounts_to_create = args.num_threads * 4;
-    }
-    while accounts_to_create > 0 {
-        println!("({} accounts remain to be created)", accounts_to_create);
-        let rpc_client = { rpc_clients.lock().unwrap().get() };
-        let mut create_count = accounts_to_create;
-        if create_count > 8 {
-            create_count = 8;
-        }
-        let mut command_accounts = CommandAccounts::new();
-        let mut data = vec![];
-        for _ in 0..create_count {
-            // Generate a seed to create from
-            let seed = &rng.next_u64().to_le_bytes()[0..7];
-            let (address, bump_seed) = Pubkey::find_program_address(&[seed], &program_ids[0]);
-            let mut seed = seed.to_vec();
-            seed.push(bump_seed);
-            let size = (rng.next_u32() % ((10 * 1024) + 1)) as u16;
-            let account = Account { address, seed, size };
-            add_create_account_command(&funds_source.pubkey(), &account, &mut command_accounts, &mut data);
-            accounts.lock().unwrap().add_new_account(account);
-        }
+    //    let mut accounts_to_create = CONTENTION_ACCOUNT_COUNT;
+    //    if accounts_to_create > (args.num_threads * 4) {
+    //        accounts_to_create = args.num_threads * 4;
+    //    }
+    //    while accounts_to_create > 0 {
+    //        println!("({} accounts remain to be created)", accounts_to_create);
+    //        let rpc_client = { rpc_clients.lock().unwrap().get() };
+    //        let mut create_count = accounts_to_create;
+    //        if create_count > 8 {
+    //            create_count = 8;
+    //        }
+    //        let mut command_accounts = CommandAccounts::new();
+    //        let mut data = vec![];
+    //        for _ in 0..create_count {
+    //            // Generate a seed to create from
+    //            let seed = &rng.next_u64().to_le_bytes()[0..7];
+    //            let (address, bump_seed) = Pubkey::find_program_address(&[seed], &program_ids[0]);
+    //            let mut seed = seed.to_vec();
+    //            seed.push(bump_seed);
+    //            let size = (rng.next_u32() % ((10 * 1024) + 1)) as u16;
+    //            let account = Account { address, seed, size };
+    //            add_create_account_command(&funds_source.pubkey(), &account, &mut command_accounts, &mut data);
+    //            accounts.lock().unwrap().add_new_account(account);
+    //        }
+    //
+    //        let recent_blockhash = recent_blockhash_fetcher.lock().unwrap().get();
+    //
+    //        let program_id = &program_ids[0];
+    //
+    //        let instructions = vec![Instruction::new_with_bytes(
+    //            program_id.clone(),
+    //            data.as_slice(),
+    //            command_accounts.get_account_metas()
+    //        )];
+    //
+    //        let transaction = Transaction::new(
+    //            &vec![&funds_source],
+    //            Message::new(&instructions, Some(&funds_source.pubkey())),
+    //            recent_blockhash
+    //        );
+    //
+    //        println!(
+    //            "Submitting transaction {} to RPC\n  Signature: {}",
+    //            base64::encode(bincode::serialize(&transaction).expect("encode")),
+    //            transaction.signatures[0]
+    //        );
+    //
+    //        match rpc_client.send_and_confirm_transaction(&transaction) {
+    //            Ok(_) => accounts_to_create -= create_count,
+    //            Err(e) => println!("TX failed: {}", e)
+    //        }
+    //    }
 
-        let recent_blockhash = recent_blockhash_fetcher.lock().unwrap().get();
-
-        let program_id = &program_ids[0];
-
-        let instructions = vec![Instruction::new_with_bytes(
-            program_id.clone(),
-            data.as_slice(),
-            command_accounts.get_account_metas()
-        )];
-
-        let transaction = Transaction::new(
-            &vec![&funds_source],
-            Message::new(&instructions, Some(&funds_source.pubkey())),
-            recent_blockhash
-        );
-
-        println!(
-            "Submitting transaction {} to RPC\n  Signature: {}",
-            base64::encode(bincode::serialize(&transaction).expect("encode")),
-            transaction.signatures[0]
-        );
-
-        match rpc_client.send_and_confirm_transaction(&transaction) {
-            Ok(_) => accounts_to_create -= create_count,
-            Err(e) => println!("TX failed: {}", e)
-        }
+    // Fill the Accounts vector with the contention accounts
+    let contention_accounts_program_id = &program_ids[0];
+    for index in 0..args.contention_accounts_count {
+        let seed = &(index as u64).to_le_bytes()[0..7];
+        let (address, bump_seed) = Pubkey::find_program_address(&[seed], contention_accounts_program_id);
+        let mut seed = seed.to_vec();
+        seed.push(bump_seed);
+        accounts.lock().unwrap().add_new_account(Account { address, seed, size : 100 });
     }
 
     let iterations = args.total_transactions.map(|t| Arc::new(Mutex::new(t)));
@@ -1389,69 +1440,69 @@ fn main()
 
     // Delete accounts that were created
 
-    let mut accounts = accounts.lock().unwrap();
-
-    loop {
-        if accounts.count() == 0 {
-            break;
-        }
-
-        println!("({} accounts remain to be deleted)", accounts.map.len());
-
-        // Delete 8 at a time
-        let mut v = vec![];
-
-        for i in 0..8 {
-            if let Some(account) = accounts.take_random_account(&mut rng) {
-                v.push(account);
-            }
-            else {
-                break;
-            }
-        }
-
-        let program_id = &program_ids[0];
-
-        let mut data = vec![];
-
-        let mut command_accounts = CommandAccounts::new();
-
-        for account in &v {
-            add_delete_account_command(&funds_source.pubkey(), account, &mut command_accounts, &mut data);
-        }
-
-        let instructions = vec![Instruction::new_with_bytes(
-            program_id.clone(),
-            data.as_slice(),
-            command_accounts.get_account_metas()
-        )];
-
-        //let rpc_client = rpc_clients.get_finalized();
-        let rpc_client = { rpc_clients.lock().unwrap().get() };
-
-        let recent_blockhash = recent_blockhash_fetcher.lock().unwrap().get();
-
-        let transaction = Transaction::new(
-            &vec![&funds_source],
-            Message::new(&instructions, Some(&funds_source.pubkey())),
-            recent_blockhash
-        );
-
-        println!(
-            "Submitting transaction {} to RPC\n  Signature: {}",
-            base64::encode(bincode::serialize(&transaction).expect("encode")),
-            transaction.signatures[0]
-        );
-
-        match rpc_client.send_and_confirm_transaction(&transaction) {
-            Ok(_) => (),
-            Err(e) => {
-                println!("TX failed: {}", e);
-                // Failed transaction, so all accounts it tried to delete are back
-                v.into_iter().for_each(|account| accounts.add_existing_account(account));
-            }
-        }
-    }
+    //    let mut accounts = accounts.lock().unwrap();
+    //
+    //    loop {
+    //        if accounts.count() == 0 {
+    //            break;
+    //        }
+    //
+    //        println!("({} accounts remain to be deleted)", accounts.map.len());
+    //
+    //        // Delete 8 at a time
+    //        let mut v = vec![];
+    //
+    //        for i in 0..8 {
+    //            if let Some(account) = accounts.take_random_account(&mut rng) {
+    //                v.push(account);
+    //            }
+    //            else {
+    //                break;
+    //            }
+    //        }
+    //
+    //        let program_id = &program_ids[0];
+    //
+    //        let mut data = vec![];
+    //
+    //        let mut command_accounts = CommandAccounts::new();
+    //
+    //        for account in &v {
+    //            add_delete_account_command(&funds_source.pubkey(), account, &mut command_accounts, &mut data);
+    //        }
+    //
+    //        let instructions = vec![Instruction::new_with_bytes(
+    //            program_id.clone(),
+    //            data.as_slice(),
+    //            command_accounts.get_account_metas()
+    //        )];
+    //
+    //        //let rpc_client = rpc_clients.get_finalized();
+    //        let rpc_client = { rpc_clients.lock().unwrap().get() };
+    //
+    //        let recent_blockhash = recent_blockhash_fetcher.lock().unwrap().get();
+    //
+    //        let transaction = Transaction::new(
+    //            &vec![&funds_source],
+    //            Message::new(&instructions, Some(&funds_source.pubkey())),
+    //            recent_blockhash
+    //        );
+    //
+    //        println!(
+    //            "Submitting transaction {} to RPC\n  Signature: {}",
+    //            base64::encode(bincode::serialize(&transaction).expect("encode")),
+    //            transaction.signatures[0]
+    //        );
+    //
+    //        match rpc_client.send_and_confirm_transaction(&transaction) {
+    //            Ok(_) => (),
+    //            Err(e) => {
+    //                println!("TX failed: {}", e);
+    //                // Failed transaction, so all accounts it tried to delete are back
+    //                v.into_iter().for_each(|account| accounts.add_existing_account(account));
+    //            }
+    //        }
+    //    }
 }
 
 fn transfer_lamports(
