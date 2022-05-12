@@ -1365,9 +1365,11 @@ fn transaction_thread_function(
         //        );
 
         // Send to prev, current, and next leader
-        let _ = UdpSocket::bind("0.0.0.0:0").unwrap().send_to(tx_bytes.as_slice(), current_tpus.0);
+        // Actually just send to 'current'.  Sending to others doesn't seem to improve the rate at which
+        // transactions land.
+        //let _ = UdpSocket::bind("0.0.0.0:0").unwrap().send_to(tx_bytes.as_slice(), current_tpus.0);
         let _ = UdpSocket::bind("0.0.0.0:0").unwrap().send_to(tx_bytes.as_slice(), current_tpus.1);
-        let _ = UdpSocket::bind("0.0.0.0:0").unwrap().send_to(tx_bytes.as_slice(), current_tpus.2);
+        //let _ = UdpSocket::bind("0.0.0.0:0").unwrap().send_to(tx_bytes.as_slice(), current_tpus.2);
     }
 
     // Take back all SOL from the fee payer
