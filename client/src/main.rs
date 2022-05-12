@@ -46,7 +46,7 @@ const SYSVAR_COMMAND_COST : u32 = 500;
 // These govern the shape of transactions; these could be made into command line parameters if that was useful
 const FAIL_COMMAND_CHANCE : f32 = 0.001;
 const MAX_ALLOC_BYTES : u32 = 1000;
-const RECENT_BLOCKHASH_REFRESH_INTERVAL_SECS : u64 = 30;
+const RECENT_BLOCKHASH_REFRESH_INTERVAL_SECS : u64 = 10;
 const CONTENTION_ACCOUNT_COUNT : u32 = 20;
 const LAMPORTS_PER_TRANSFER : u64 = LAMPORTS_PER_SOL / 5;
 
@@ -314,11 +314,19 @@ impl CurrentTpu
         rpc_clients : &Arc<Mutex<RpcClients>>
     ) -> Self
     {
+        println!("Creating TPU fetcher");
+
         let tpu_fetcher = TpuFetcher::new(tpu_file);
+
+        println!("Creating leaders fetcher");
 
         let leaders_fetcher = LeadersFetcher::new(&rpc_clients);
 
+        println!("Creating slot fetcher");
+
         let slot_fetcher = SlotFetcher::new(&rpc_clients);
+
+        println!("Done creating current TPU fetcher");
 
         let current_tpu = loop {
             let rpc_client = { rpc_clients.lock().unwrap().get() };
@@ -1157,7 +1165,7 @@ fn transaction_thread_function(
 
         let rpc_client = { rpc_clients.lock().unwrap().get() };
 
-        let recent_blockhash = recent_blockhash_fetcher.lock().unwrap().get();
+        let mut recent_blockhash = recent_blockhash_fetcher.lock().unwrap().get();
 
         // Only check balance once every 1,000 iterations
         if (iterations % 1000) == 0 {
@@ -1169,21 +1177,32 @@ fn transaction_thread_function(
                 println!("Thread {}: iteration {}", thread_number, iterations);
             }
             // When balance falls below 1 SOL, take 1 SOL from funds source
-            if rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(0) < LAMPORTS_PER_TRANSFER {
-                transfer_lamports(
-                    &rpc_client,
-                    &funds_source,
-                    &funds_source,
-                    &fee_payer_pubkey,
-                    LAMPORTS_PER_TRANSFER,
-                    &recent_blockhash
-                );
-                // If the balance is still too low, continue the loop to try again
-                if rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(0) < LAMPORTS_PER_TRANSFER {
-                    // And wait a tiny bit so as not to re-try in such a tight loop
-                    std::thread::sleep(Duration::from_millis(250));
-                    continue;
+            loop {
+                if rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(0) < (LAMPORTS_PER_TRANSFER / 2) {
+                    transfer_lamports(
+                        &rpc_client,
+                        &funds_source,
+                        &funds_source,
+                        &fee_payer_pubkey,
+                        LAMPORTS_PER_TRANSFER,
+                        &recent_blockhash
+                    );
+                    // If the balance is still too low, continue the loop to try again
+                    if rpc_client.get_balance(&fee_payer_pubkey).unwrap_or(0) < LAMPORTS_PER_TRANSFER {
+                        // Wait until the recent blockhash has changed so as not to repeat the request
+                        loop {
+                            std::thread::sleep(Duration::from_millis(250));
+                            let new_recent_blockhash = recent_blockhash_fetcher.lock().unwrap().get();
+                            if new_recent_blockhash == recent_blockhash {
+                                continue;
+                            }
+                            recent_blockhash = new_recent_blockhash;
+                            break;
+                        }
+                        continue;
+                    }
                 }
+                break;
             }
         }
 
@@ -1356,7 +1375,7 @@ fn main()
     });
 
     if stop_file_exists(args.stop_file.as_str()) {
-        eprintln!("ERROR: stop file {} exists", args.stop_file);
+        eprintln!("ERROR: stop file \"{}\" exists", args.stop_file);
         std::process::exit(-1)
     }
 
@@ -1572,5 +1591,8 @@ fn transfer_lamports(
     );
 
     // Ignore the result.  If take_funds fails, the check for balance will try again.
-    let _ = rpc_client.send_and_confirm_transaction(&transaction);
+    match rpc_client.send_and_confirm_transaction(&transaction) {
+        Ok(_) => (),
+        Err(err) => println!("Failed transfer: {}", err)
+    }
 }
