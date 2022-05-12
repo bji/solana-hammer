@@ -403,6 +403,9 @@ struct Args
     // file to read tpu info from
     pub tpu_file : String,
 
+    // File to stop iterations, when it exists (defaults to "stop")
+    pub stop_file : String,
+
     // Explicitly named RPC servers
     pub rpc_servers : Vec<String>,
 
@@ -678,6 +681,8 @@ fn parse_args() -> Result<Args, String>
 
     let mut tpu_file = None;
 
+    let mut stop_file = None;
+
     let mut rpc_servers = Vec::<String>::new();
 
     let mut funds_source = None;
@@ -709,6 +714,14 @@ fn parse_args() -> Result<Args, String>
                 }
                 let file = args.nth(0).ok_or("--tpu-file requires a value".to_string())?;
                 tpu_file = Some(file);
+            },
+
+            "--stop-file" => {
+                if stop_file.is_some() {
+                    return Err("Duplicate --stop-file".to_string());
+                }
+                let file = args.nth(0).ok_or("--stop-file requires a value".to_string())?;
+                stop_file = Some(file);
             },
 
             "--rpc-server" => {
@@ -789,6 +802,12 @@ fn parse_args() -> Result<Args, String>
 
     let tpu_file = tpu_file.unwrap();
 
+    if stop_file.is_none() {
+        stop_file = Some("stop".to_string());
+    }
+
+    let stop_file = stop_file.unwrap();
+
     if funds_source.is_none() {
         return Err("--funds-source argument is required".to_string());
     }
@@ -814,6 +833,7 @@ fn parse_args() -> Result<Args, String>
     Ok(Args {
         keys_dir,
         tpu_file,
+        stop_file,
         rpc_servers,
         funds_source,
         program_ids,
@@ -829,6 +849,11 @@ fn write(
 )
 {
     w.write(b).expect("Internal fail to write");
+}
+
+fn stop_file_exists(stop_file : &str) -> bool
+{
+    std::fs::metadata(stop_file).is_ok()
 }
 
 fn add_create_account_command(
@@ -1097,7 +1122,8 @@ fn transaction_thread_function(
     funds_source : Keypair,
     mut accounts : Arc<Mutex<Accounts>>,
     current_tpu : CurrentTpu,
-    total_transactions : Option<Arc<Mutex<u64>>>
+    total_transactions : Arc<Mutex<Option<u64>>>,
+    stop_file : &str
 )
 {
     // Make a fee payer for this thread
@@ -1115,10 +1141,17 @@ fn transaction_thread_function(
     let mut iterations = 0;
 
     loop {
+        // When the stop file exists, stop the loop
+        if stop_file_exists(stop_file) {
+            break;
+        }
         // Make sure there are still transactions to complete before doing balance transfer
-        if let Some(ref total_transactions) = total_transactions {
-            if *(total_transactions.lock().unwrap()) == 0 {
-                break;
+        {
+            let total_transactions = { *(total_transactions.lock().unwrap()) };
+            if let Some(total_transactions) = total_transactions {
+                if total_transactions == 0 {
+                    break;
+                }
             }
         }
 
@@ -1128,9 +1161,9 @@ fn transaction_thread_function(
 
         // Only check balance once every 1,000 iterations
         if (iterations % 1000) == 0 {
-            if let Some(ref total_transactions) = total_transactions {
-                let total_transactions = total_transactions.lock().unwrap();
-                println!("Thread {}: iteration {} ({} remaining)", thread_number, iterations, *total_transactions);
+            let total_transactions = { *(total_transactions.lock().unwrap()) };
+            if let Some(total_transactions) = total_transactions {
+                println!("Thread {}: iteration {} ({} remaining)", thread_number, iterations, total_transactions);
             }
             else {
                 println!("Thread {}: iteration {}", thread_number, iterations);
@@ -1156,12 +1189,14 @@ fn transaction_thread_function(
 
         iterations += 1;
 
-        if let Some(ref total_transactions) = total_transactions {
+        {
             let mut total_transactions = total_transactions.lock().unwrap();
-            if *total_transactions == 0 {
-                break;
+            if let Some(total_transactions_value) = *total_transactions {
+                if total_transactions_value == 0 {
+                    break;
+                }
+                *total_transactions = Some(total_transactions_value - 1)
             }
-            *total_transactions -= 1;
         }
 
         let program_id = &program_ids[(rng.next_u32() as usize) % program_ids.len()];
@@ -1320,6 +1355,11 @@ fn main()
         std::process::exit(-1)
     });
 
+    if stop_file_exists(args.stop_file.as_str()) {
+        eprintln!("ERROR: stop file {} exists", args.stop_file);
+        std::process::exit(-1)
+    }
+
     let rng = rand::thread_rng();
 
     let rpc_clients = Arc::new(Mutex::new(RpcClients::new(args.rpc_servers.clone())));
@@ -1402,7 +1442,7 @@ fn main()
         accounts.lock().unwrap().add_new_account(Account { address, seed, size : 100 });
     }
 
-    let iterations = args.total_transactions.map(|t| Arc::new(Mutex::new(t)));
+    let iterations = Arc::new(Mutex::new(args.total_transactions));
 
     let print_lock = Arc::new(Mutex::new(()));
 
@@ -1417,6 +1457,7 @@ fn main()
         let accounts = accounts.clone();
         let current_tpu = current_tpu.clone();
         let iterations = iterations.clone();
+        let stop_file = args.stop_file.clone();
 
         threads.push(std::thread::spawn(move || {
             transaction_thread_function(
@@ -1428,7 +1469,8 @@ fn main()
                 funds_source,
                 accounts,
                 current_tpu,
-                iterations
+                iterations,
+                &stop_file.as_str()
             )
         }));
     }
