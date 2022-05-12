@@ -302,12 +302,12 @@ impl TpuFetcher
 }
 
 #[derive(Clone)]
-struct CurrentTpu
+struct CurrentTpus
 {
-    current_tpu : Arc<Mutex<SocketAddr>>
+    current_tpus : Arc<Mutex<(SocketAddr, SocketAddr, SocketAddr)>>
 }
 
-impl CurrentTpu
+impl CurrentTpus
 {
     pub fn new(
         tpu_file : &String,
@@ -328,41 +328,42 @@ impl CurrentTpu
 
         println!("Done creating current TPU fetcher");
 
-        let current_tpu = loop {
+        let current_tpus = loop {
             let rpc_client = { rpc_clients.lock().unwrap().get() };
-            if let Some(tpu) = Self::update(&rpc_client, &slot_fetcher, &leaders_fetcher, &tpu_fetcher) {
-                break tpu;
+            if let Some(tpus) = Self::update(&rpc_client, &slot_fetcher, &leaders_fetcher, &tpu_fetcher) {
+                break tpus;
             }
             else {
                 std::thread::sleep(Duration::from_millis(500));
             }
         };
 
-        let current_tpu : Arc<Mutex<SocketAddr>> = Arc::new(Mutex::new(current_tpu));
+        let current_tpus = Arc::new(Mutex::new(current_tpus));
 
         // Start a thread to keep current_tpu up-to-date
         {
             let rpc_clients = rpc_clients.clone();
-            let current_tpu = current_tpu.clone();
+            let current_tpus = current_tpus.clone();
 
             std::thread::spawn(move || {
                 loop {
                     // Wait 500 ms to re-update leader TPU
                     std::thread::sleep(Duration::from_millis(500));
                     let rpc_client = { rpc_clients.lock().unwrap().get() };
-                    if let Some(tpu) = Self::update(&rpc_client, &slot_fetcher, &leaders_fetcher, &tpu_fetcher) {
-                        *(current_tpu.lock().unwrap()) = tpu;
+                    if let Some(tpus) = Self::update(&rpc_client, &slot_fetcher, &leaders_fetcher, &tpu_fetcher) {
+                        *(current_tpus.lock().unwrap()) = tpus;
                     }
                 }
             });
         }
 
-        Self { current_tpu }
+        Self { current_tpus }
     }
 
-    pub fn get(&self) -> SocketAddr
+    // Returns (prev, current, next) leader TPU socket address
+    pub fn get(&self) -> (SocketAddr, SocketAddr, SocketAddr)
     {
-        self.current_tpu.lock().unwrap().clone()
+        self.current_tpus.lock().unwrap().clone()
     }
 
     fn update(
@@ -370,9 +371,9 @@ impl CurrentTpu
         slot_fetcher : &SlotFetcher,
         leaders_fetcher : &LeadersFetcher,
         tpu_fetcher : &TpuFetcher
-    ) -> Option<SocketAddr>
+    ) -> Option<(SocketAddr, SocketAddr, SocketAddr)>
     {
-        // Update tpu
+        // Update tpus
 
         // Get the current slot and the timestamp of when it was fetched
         let (slot_at, slot) = slot_fetcher.get();
@@ -381,16 +382,43 @@ impl CurrentTpu
         let slot =
             slot + (SystemTime::now().duration_since(slot_at).map(|d| d.as_millis() as u64).unwrap_or(u64::MAX) / 500);
 
-        // Get the upcoming slot leader
-        if let Some(leader) = leaders_fetcher.get(slot + 4) {
-            if let Some(tpu) = tpu_fetcher.get(&leader) {
-                Some(tpu)
+        // Get the upcoming slot leaders
+        let prev = leaders_fetcher.get(slot - 4);
+        let current = leaders_fetcher.get(slot);
+        let next = leaders_fetcher.get(slot + 4);
+        if prev.is_some() && current.is_some() && next.is_some() {
+            let prev = tpu_fetcher.get(&prev.unwrap());
+            let current = tpu_fetcher.get(&current.unwrap());
+            let next = tpu_fetcher.get(&next.unwrap());
+            if prev.is_none() {
+                if current.is_none() {
+                    if next.is_none() {
+                        None
+                    }
+                    else {
+                        Some((next.unwrap().clone(), next.unwrap().clone(), next.unwrap()))
+                    }
+                }
+                else if next.is_none() {
+                    Some((current.unwrap().clone(), current.unwrap().clone(), current.unwrap()))
+                }
+                else {
+                    Some((current.unwrap().clone(), current.unwrap(), next.unwrap()))
+                }
+            }
+            else if current.is_none() {
+                if next.is_none() {
+                    Some((prev.unwrap().clone(), prev.unwrap().clone(), prev.unwrap()))
+                }
+                else {
+                    Some((prev.unwrap().clone(), prev.unwrap().clone(), next.unwrap()))
+                }
+            }
+            else if next.is_none() {
+                Some((prev.unwrap(), current.unwrap().clone(), current.unwrap()))
             }
             else {
-                // There is no validator that maps from that leader; weird that a validator would be
-                // in the leader schedule but unknown to us.  There's nothing to do except wait try another
-                // slot later.
-                None
+                Some((prev.unwrap(), current.unwrap(), next.unwrap()))
             }
         }
         else {
@@ -1129,7 +1157,7 @@ fn transaction_thread_function(
     program_ids : Vec<Pubkey>,
     funds_source : Keypair,
     mut accounts : Arc<Mutex<Accounts>>,
-    current_tpu : CurrentTpu,
+    current_tpus : CurrentTpus,
     total_transactions : Arc<Mutex<Option<u64>>>,
     stop_file : &str
 )
@@ -1323,7 +1351,7 @@ fn transaction_thread_function(
 
         let tx_bytes = bincode::serialize(&transaction).expect("encode");
 
-        let current_tpu = current_tpu.get();
+        let current_tpus = current_tpus.get();
 
         //        locked_println(
         //            &print_lock,
@@ -1336,7 +1364,10 @@ fn transaction_thread_function(
         //            )
         //        );
 
-        let _ = UdpSocket::bind("0.0.0.0:0").unwrap().send_to(tx_bytes.as_slice(), current_tpu);
+        // Send to prev, current, and next leader
+        let _ = UdpSocket::bind("0.0.0.0:0").unwrap().send_to(tx_bytes.as_slice(), current_tpus.0);
+        let _ = UdpSocket::bind("0.0.0.0:0").unwrap().send_to(tx_bytes.as_slice(), current_tpus.1);
+        let _ = UdpSocket::bind("0.0.0.0:0").unwrap().send_to(tx_bytes.as_slice(), current_tpus.2);
     }
 
     // Take back all SOL from the fee payer
@@ -1383,7 +1414,7 @@ fn main()
 
     let rpc_clients = Arc::new(Mutex::new(RpcClients::new(args.rpc_servers.clone())));
 
-    let current_tpu = CurrentTpu::new(&args.tpu_file, &rpc_clients);
+    let current_tpus = CurrentTpus::new(&args.tpu_file, &rpc_clients);
 
     let program_ids = args.program_ids;
 
@@ -1474,7 +1505,7 @@ fn main()
         let program_ids = program_ids.clone();
         let funds_source = Keypair::from_bytes(&funds_source.to_bytes()).expect("");
         let accounts = accounts.clone();
-        let current_tpu = current_tpu.clone();
+        let current_tpus = current_tpus.clone();
         let iterations = iterations.clone();
         let stop_file = args.stop_file.clone();
 
@@ -1487,7 +1518,7 @@ fn main()
                 program_ids,
                 funds_source,
                 accounts,
-                current_tpu,
+                current_tpus,
                 iterations,
                 &stop_file.as_str()
             )
