@@ -374,7 +374,7 @@ impl CurrentTpu
             slot + (SystemTime::now().duration_since(slot_at).map(|d| d.as_millis() as u64).unwrap_or(u64::MAX) / 500);
 
         // Get the upcoming slot leader
-        if let Some(leader) = leaders_fetcher.get(slot) {
+        if let Some(leader) = leaders_fetcher.get(slot + 4) {
             if let Some(tpu) = tpu_fetcher.get(&leader) {
                 Some(tpu)
             }
